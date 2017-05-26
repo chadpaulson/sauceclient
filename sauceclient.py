@@ -1,7 +1,6 @@
 #!/usr/bin/env python
-"""Sauce Labs REST API client
-
-#   Copyright (c) 2013-2017 Corey Goldberg
+#
+# Copyright (c) 2013 Corey Goldberg
 #
 #   This file is part of: sauceclient
 #   https://github.com/cgoldberg/sauceclient
@@ -16,378 +15,197 @@
 #
 #   Sauce Labs REST API documentation:
 #     http://saucelabs.com/docs/rest
-"""
+
 
 import base64
-import hmac
+import sys
 import json
-import os
-from hashlib import md5
 
-try:
-    import http.client as http_client
-    from urllib.parse import urlencode
-except ImportError:
+__version__ = '0.2.1'
+
+is_py2 = sys.version_info.major is 2
+
+if is_py2:
     import httplib as http_client
-    from urllib import urlencode
+else:
+    import http.client as http_client
 
 
-__version__ = '1.0dev'
-
-
-class SauceException(Exception):
-    """SauceClient exception."""
-
-    def __init__(self, *args, **kwargs):
-        """Initialize class."""
-        super(SauceException, self).__init__(*args)
-        self.response = kwargs.get('response')
+def json_loads(json_data):
+    if not is_py2:
+        json_data = json_data.decode(encoding='UTF-8')
+    return json.loads(json_data)
 
 
 class SauceClient(object):
-    """SauceClient class."""
-    apibase = 'https://saucelabs.com'
-
     def __init__(self, sauce_username=None, sauce_access_key=None):
-        """Initialize class."""
         self.sauce_username = sauce_username
         self.sauce_access_key = sauce_access_key
         self.headers = self.make_headers()
-        self.account = Account(self)
         self.information = Information(self)
-        self.javascript = JavaScriptTests(self)
         self.jobs = Jobs(self)
-        self.storage = Storage(self)
-        self.tunnels = Tunnels(self)
+        self.provisioning = Provisioning(self)
+        self.usage = Usage(self)
 
-    def get_auth_string(self):
-        """Create auth string from credentials."""
-        auth_info = '{}:{}'.format(self.sauce_username, self.sauce_access_key)
-        return base64.b64encode(auth_info.encode('utf-8')).decode('utf-8')
-
-    def make_headers(self, content_type='application/json'):
-        """Create content-type header."""
-        return {
-            'Content-Type': content_type,
+    def make_headers(self):
+        base64string = self.get_encoded_auth_string()
+        headers = {
+            'Authorization': 'Basic %s' % base64string,
+            'Content-Type': 'application/json',
         }
-
-    def make_auth_headers(self, content_type):
-        """Add authorization header."""
-        headers = self.make_headers(content_type)
-        headers['Authorization'] = 'Basic {}'.format(self.get_auth_string())
         return headers
 
-    def request(self, method, url, body=None, content_type='application/json'):
-        """Send http request."""
-        headers = self.make_auth_headers(content_type)
+    def request(self, method, url, body=None):
         connection = http_client.HTTPSConnection('saucelabs.com')
-        connection.request(method, url, body, headers=headers)
+        connection.request(method, url, body, headers=self.headers)
         response = connection.getresponse()
-        data = response.read()
+        json_data = response.read()
         connection.close()
-        if response.status not in [200, 201]:
-            raise SauceException('{}: {}.\nSauce Status NOT OK'.format(
-                response.status, response.reason), response=response)
-        return json.loads(data.decode('utf-8'))
+        if response.status != 200:
+            raise Exception('%s: %s.\nSauce Status NOT OK' %
+                            (response.status, response.reason))
+        return json_data
 
-
-class Account(object):
-    """Account Methods
-
-    These methods provide user account information and management.
-    - https://wiki.saucelabs.com/display/DOCS/Account+Methods
-    """
-    def __init__(self, client):
-        """Initialize class."""
-        self.client = client
-
-    def get_user(self):
-        """Access basic account information."""
-        method = 'GET'
-        endpoint = '/rest/v1/users/{}'.format(self.client.sauce_username)
-        return self.client.request(method, endpoint)
-
-    def create_user(self, username, password, name, email):
-        """Create a sub account."""
-        method = 'POST'
-        endpoint = '/rest/v1/users/{}'.format(self.client.sauce_username)
-        body = json.dumps({'username': username, 'password': password,
-                           'name': name, 'email': email, })
-        return self.client.request(method, endpoint, body)
-
-    def get_concurrency(self):
-        """Check account concurrency limits."""
-        method = 'GET'
-        endpoint = '/rest/v1.1/users/{}/concurrency'.format(
-            self.client.sauce_username)
-        return self.client.request(method, endpoint)
-
-    def get_subaccounts(self):
-        """Get a list of sub accounts associated with a parent account."""
-        method = 'GET'
-        endpoint = '/rest/v1/users/{}/list-subaccounts'.format(
-            self.client.sauce_username)
-        return self.client.request(method, endpoint)
-
-    def get_siblings(self):
-        """Get a list of sibling accounts associated with provided account."""
-        method = 'GET'
-        endpoint = '/rest/v1.1/users/{}/siblings'.format(
-            self.client.sauce_username)
-        return self.client.request(method, endpoint)
-
-    def get_subaccount_info(self):
-        """Get information about a sub account."""
-        method = 'GET'
-        endpoint = '/rest/v1/users/{}/subaccounts'.format(
-            self.client.sauce_username)
-        return self.client.request(method, endpoint)
-
-    def change_access_key(self):
-        """Change access key of your account."""
-        method = 'POST'
-        endpoint = '/rest/v1/users/{}/accesskey/change'.format(
-            self.client.sauce_username)
-        return self.client.request(method, endpoint)
-
-    def get_activity(self):
-        """Check account concurrency limits."""
-        method = 'GET'
-        endpoint = '/rest/v1/{}/activity'.format(self.client.sauce_username)
-        return self.client.request(method, endpoint)
-
-    def get_usage(self, start=None, end=None):
-        """Access historical account usage data."""
-        method = 'GET'
-        endpoint = '/rest/v1/users/{}/usage'.format(self.client.sauce_username)
-        data = {}
-        if start:
-            data['start'] = start
-        if end:
-            data['end'] = end
-        if data:
-            endpoint = '?'.join([endpoint, urlencode(data)])
-        return self.client.request(method, endpoint)
-
-
-class Information(object):
-    """Information Methods
-
-    Information resources are publicly available data about
-    Sauce Lab's service.
-    - https://wiki.saucelabs.com/display/DOCS/Information+Methods
-    """
-    def __init__(self, client):
-        """Initialize class."""
-        self.client = client
-
-    def get_status(self):
-        """Get the current status of Sauce Labs services."""
-        method = 'GET'
-        endpoint = '/rest/v1/info/status'
-        return self.client.request(method, endpoint)
-
-    def get_platforms(self, automation_api='all'):
-        """Get a list of objects describing all the OS and browser platforms
-        currently supported on Sauce Labs."""
-        method = 'GET'
-        endpoint = '/rest/v1/info/platforms/{}'.format(automation_api)
-        return self.client.request(method, endpoint)
-
-    def get_appium_eol_dates(self):
-        """Get a list of Appium end-of-life dates. Dates are displayed in Unix
-        time."""
-        method = 'GET'
-        endpoint = '/rest/v1/info/platforms/appium/eol'
-        return self.client.request(method, endpoint)
-
-
-class JavaScriptTests(object):
-    """JavaScript Unit Testing Methods
-
-    - https://wiki.saucelabs.com/display/DOCS/JavaScript+Unit+Testing+Methods
-    """
-    def __init__(self, client):
-        self.client = client
-
-    def js_tests(self, platforms, url, framework):
-        """Start your JavaScript unit tests on as many browsers as you like
-        with a single request."""
-        method = 'POST'
-        endpoint = '/rest/v1/{}/js-tests'.format(self.client.sauce_username)
-        body = json.dumps({'platforms': platforms, 'url': url,
-                           'framework': framework, })
-        return self.client.request(method, endpoint, body)
-
-    def js_tests_status(self, js_tests):
-        """Get the status of your JS unit tests."""
-        method = 'POST'
-        endpoint = '/rest/v1/{}/js-tests/status'.format(
-            self.client.sauce_username)
-        body = json.dumps({
-            'js tests': js_tests,
-        })
-        return self.client.request(method, endpoint, body)
+    def get_encoded_auth_string(self):
+        auth_info = '%s:%s' % (self.sauce_username, self.sauce_access_key)
+        if is_py2:
+            base64string = base64.encodestring(auth_info)[:-1]
+        else:
+            base64string = base64.b64encode(auth_info.encode(encoding='UTF-8')).decode(encoding='UTF-8')
+        return base64string
 
 
 class Jobs(object):
-    """Job Methods
-
-    - https://wiki.saucelabs.com/display/DOCS/Job+Methods
-    """
     def __init__(self, client):
-        """Initialize class."""
         self.client = client
 
-    def get_jobs(self, full=None, limit=None, skip=None, start=None, end=None,
-                 output_format=None):
-        """List jobs belonging to a specific user."""
+    def get_job_ids(self):
+        """List all jobs id's belonging to the user."""
         method = 'GET'
-        endpoint = '/rest/v1/{}/jobs'.format(self.client.sauce_username)
-        data = {}
-        if full is not None:
-            data['full'] = full
-        if limit is not None:
-            data['limit'] = limit
-        if skip is not None:
-            data['skip'] = skip
-        if start is not None:
-            data['from'] = start
-        if end is not None:
-            data['to'] = end
-        if output_format is not None:
-            data['format'] = output_format
-        if data:
-            endpoint = '?'.join([endpoint, urlencode(data)])
-        return self.client.request(method, endpoint)
+        url = '/rest/v1/%s/jobs' % self.client.sauce_username
+        json_data = self.client.request(method, url)
+        jobs = json_loads(json_data)
+        job_ids = [attr['id'] for attr in jobs]
+        return job_ids
 
-    def get_job(self, job_id):
-        """Retreive a single job."""
+    def get_jobs_range(self, range_from, range_to, skip):
+        """List all jobs belonging to the user for a given date range."""
         method = 'GET'
-        endpoint = '/rest/v1/{}/jobs/{}'.format(self.client.sauce_username,
-                                                job_id)
-        return self.client.request(method, endpoint)
+        url = '/rest/v1/%s/jobs?limit=500&full=true&from=%s&to=%s&skip=%s' % (
+            self.client.sauce_username, range_from, range_to, skip)
+        json_data = self.client.request(method, url)
+        jobs = json_loads(json_data)
+        return jobs
 
-    def update_job(self, job_id, build=None, custom_data=None,
+    def get_jobs(self):
+        """List all jobs belonging to the user."""
+        method = 'GET'
+        url = '/rest/v1/%s/jobs?full=true' % self.client.sauce_username
+        json_data = self.client.request(method, url)
+        jobs = json_loads(json_data)
+        return jobs
+
+    def get_job_attributes(self, job_id):
+        """Get information for the specified job."""
+        method = 'GET'
+        url = '/rest/v1/%s/jobs/%s' % (self.client.sauce_username, job_id)
+        json_data = self.client.request(method, url)
+        attributes = json_loads(json_data)
+        return attributes
+
+    def update_job(self, job_id, build_num=None, custom_data=None,
                    name=None, passed=None, public=None, tags=None):
-        """Edit an existing job."""
-        method = 'PUT'
-        endpoint = '/rest/v1/{}/jobs/{}'.format(self.client.sauce_username,
-                                                job_id)
-        data = {}
-        if build is not None:
-            data['build'] = build
+        """Update attributes for the specified job."""
+        content = {}
+        if build_num is not None:
+            content['build'] = build_num
         if custom_data is not None:
-            data['custom-data'] = custom_data
+            content['custom-data'] = custom_data
         if name is not None:
-            data['name'] = name
+            content['name'] = name
         if passed is not None:
-            data['passed'] = passed
+            content['passed'] = passed
         if public is not None:
-            data['public'] = public
+            content['public'] = public
         if tags is not None:
-            data['tags'] = tags
-        body = json.dumps(data)
-        return self.client.request(method, endpoint, body=body)
-
-    def delete_job(self, job_id):
-        """Removes the job from the system with all the linked assets."""
-        method = 'DELETE'
-        endpoint = '/rest/v1/{}/jobs/{}'.format(self.client.sauce_username,
-                                                job_id)
-        return self.client.request(method, endpoint)
-
-    def stop_job(self, job_id):
-        """Terminates a running job."""
+            content['tags'] = tags
+        body = json.dumps(content)
         method = 'PUT'
-        endpoint = '/rest/v1/{}/jobs/{}/stop'.format(
-            self.client.sauce_username, job_id)
-        return self.client.request(method, endpoint)
+        url = '/rest/v1/%s/jobs/%s' % (self.client.sauce_username, job_id)
+        json_data = self.client.request(method, url, body=body)
+        attributes = json_loads(json_data)
+        return attributes
 
-    def get_job_assets(self, job_id):
-        """Get details about the static assets collected for a specific job."""
+
+class Provisioning(object):
+    def __init__(self, client):
+        self.client = client
+
+    def get_account_details(self):
+        """Access account details."""
         method = 'GET'
-        endpoint = '/rest/v1/{}/jobs/{}/assets'.format(
-            self.client.sauce_username, job_id)
-        return self.client.request(method, endpoint)
+        url = '/rest/v1/users/%s' % self.client.sauce_username
+        json_data = self.client.request(method, url)
+        attributes = json_loads(json_data)
+        return attributes
 
-    def get_job_asset_url(self, job_id, filename):
-        """Get details about the static assets collected for a specific job."""
-        return 'https://saucelabs.com/rest/v1/{}/jobs/{}/assets/{}'.format(
-            self.client.sauce_username, job_id, filename)
+    def get_account_limits(self):
+        """Access account limits."""
+        method = 'GET'
+        url = '/rest/v1/%s/limits' % self.client.sauce_username
+        json_data = self.client.request(method, url)
+        attributes = json_loads(json_data)
+        return attributes
 
-    def delete_job_assets(self, job_id):
-        """Delete all the assets captured during a test run."""
-        method = 'DELETE'
-        endpoint = '/rest/v1/{}/jobs/{}/assets'.format(
-            self.client.sauce_username, job_id)
-        return self.client.request(method, endpoint)
 
-    def get_auth_token(self, job_id, date_range=None):
-        """Get an auth token to access protected job resources.
+class Information(object):
+    def __init__(self, client):
+        self.client = client
 
-        https://wiki.saucelabs.com/display/DOCS/Building+Links+to+Test+Results
+    def get_status(self):
+        """Access the current status of Sauce Labs' services."""
+        method = 'GET'
+        url = '/rest/v1/info/status'
+        json_data = self.client.request(method, url)
+        status = json_loads(json_data)
+        return status
+
+    def get_browsers(self):
+        """Get details of all browsers currently supported on Sauce Labs."""
+        method = 'GET'
+        url = '/rest/v1/info/browsers'
+        json_data = self.client.request(method, url)
+        browsers = json_loads(json_data)
+        return browsers
+
+    def get_count(self):
+        """Get number of test executed so far on Sauce Labs."""
+        method = 'GET'
+        url = '/rest/v1/info/counter'
+        json_data = self.client.request(method, url)
+        count = json_loads(json_data)
+        return count
+
+
+class Usage(object):
+    def __init__(self, client):
+        self.client = client
+
+    def get_current_activity(self):
+        """Access current account activity.
+
+        Returns active job counts broken down by job status and subaccount.
         """
-        key = '{}:{}'.format(self.client.sauce_username,
-                             self.client.sauce_access_key)
-        if date_range:
-            key = '{}:{}'.format(key, date_range)
-        return hmac.new(key.encode('utf-8'), job_id.encode('utf-8'),
-                        md5).hexdigest()
-
-
-class Storage(object):
-    """Temporary Storage Methods
-
-    - https://wiki.saucelabs.com/display/DOCS/Temporary+Storage+Methods
-    """
-    def __init__(self, client):
-        """Initialize class."""
-        self.client = client
-
-    def upload_file(self, filepath):
-        """Uploads a file to the temporary sauce storage."""
-        method = 'POST'
-        filename = os.path.split(filepath)[1]
-        endpoint = '/rest/v1/storage/{}/{}'.format(
-            self.client.sauce_username, filename)
-        with open(filepath, 'rb') as filehandle:
-            body = filehandle.read()
-        return self.client.request(method, endpoint, body,
-                                   content_type='application/octet-stream')
-
-    def get_stored_files(self):
-        """Check which files are in your temporary storage."""
         method = 'GET'
-        endpoint = '/rest/v1/storage/{}'.format(self.client.sauce_username)
-        return self.client.request(method, endpoint)
+        url = '/rest/v1/%s/activity' % self.client.sauce_username
+        json_data = self.client.request(method, url)
+        activity = json_loads(json_data)
+        return activity
 
-
-class Tunnels(object):
-    """Tunnel Methods
-
-    - https://wiki.saucelabs.com/display/DOCS/Tunnel+Methods
-    """
-    def __init__(self, client):
-        """Initialize class."""
-        self.client = client
-
-    def get_tunnels(self):
-        """Retrieves all running tunnels for a specific user."""
+    def get_historical_usage(self):
+        """Access historical account usage."""
         method = 'GET'
-        endpoint = '/rest/v1/{}/tunnels'.format(self.client.sauce_username)
-        return self.client.request(method, endpoint)
-
-    def get_tunnel(self, tunnel_id):
-        """Get information for a tunnel given its ID."""
-        method = 'GET'
-        endpoint = '/rest/v1/{}/tunnels/{}'.format(
-            self.client.sauce_username, tunnel_id)
-        return self.client.request(method, endpoint)
-
-    def delete_tunnel(self, tunnel_id):
-        """Get information for a tunnel given its ID."""
-        method = 'DELETE'
-        endpoint = '/rest/v1/{}/tunnels/{}'.format(
-            self.client.sauce_username, tunnel_id)
-        return self.client.request(method, endpoint)
+        url = '/rest/v1/users/%s/usage' % self.client.sauce_username
+        json_data = self.client.request(method, url)
+        historical_usage = json_loads(json_data)
+        return historical_usage
